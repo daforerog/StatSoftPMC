@@ -1,0 +1,618 @@
+# Vibe Coder: Diego A. Forero, MD, PhD, 2025
+# Initial R Code Generation: Gemini (Google); R Code Refinement: Claude (Anthropic) 2025
+
+library(shiny)
+library(shinyjs)
+library(tidypmc)
+library(xml2)
+library(dplyr)
+library(DT)
+library(stringr)
+library(purrr)
+
+# --- Constants and Configuration ---
+# Software detection patterns with improved regex
+STAT_SOFTWARE_REGEX <- list(
+  R = list(
+    name = "R",
+    regex = "\\b(?:R\\s+(?:version|software|program|environment|language|project|cran|package[s]?)|\\bR\\s+version|\\bR(?:\\s+v?[0-9])|R\\s+Statistical|R\\s+Foundation)\\b",
+    version_regex = "\\bR\\s+(?:version\\s+|v)?([0-9]+\\.[0-9]+(?:\\.[0-9]+)?)",
+    color = "#276DC3"
+  ),
+  SPSS = list(
+    name = "SPSS",
+    regex = "\\b(?:SPSS|IBM\\s+SPSS\\s+Statistics?)\\b",
+    version_regex = "\\b(?:SPSS|IBM\\s+SPSS)\\s+(?:version\\s+|v)?([0-9]+(?:\\.[0-9]+)?)",
+    color = "#C5282F"
+  ),
+  SAS = list(
+    name = "SAS",
+    regex = "\\b(?:SAS(?:\\s+(?:Institute|Software|System|version|Analytics|Proc))?)\\b",
+    version_regex = "\\bSAS\\s+(?:version\\s+|v)?([0-9]+(?:\\.[0-9]+)?)",
+    color = "#1F4E79"
+  ),
+  Stata = list(
+    name = "Stata",
+    regex = "\\b(?:Stata(?:Corp|SE|MP|IC|BE)?)\\b",
+    version_regex = "\\bStata\\s+(?:version\\s+|v)?([0-9]+(?:\\.[0-9]+)?)",
+    color = "#FF6B35"
+  ),
+  GraphPad_Prism = list(
+    name = "GraphPad Prism",
+    regex = "\\b(?:GraphPad\\s+Prism)\\b",
+    version_regex = "\\bGraphPad\\s+Prism\\s+(?:version\\s+|v)?([0-9]+(?:\\.[0-9]+)?)",
+    color = "#8B4513"
+  ),
+  Python = list(
+    name = "Python",
+    regex = "\\bPython\\b(?!\\s*(?:snake|programming))",
+    version_regex = "\\bPython\\s+(?:version\\s+|v)?([0-9]+\\.[0-9]+(?:\\.[0-9]+)?)",
+    color = "#3776AB"
+  ),
+  Python_Libs = list(
+    name = "Python Libraries",
+    regex = "\\b(?:SciPy|NumPy|Pandas|scikit-learn|sklearn|Matplotlib|Statsmodels|seaborn)\\b",
+    version_regex = "\\b(?:SciPy|NumPy|Pandas|scikit-learn|sklearn|Matplotlib|Statsmodels|seaborn)\\s+(?:version\\s+|v)?([0-9]+\\.[0-9]+(?:\\.[0-9]+)?)",
+    color = "#FFD43B"
+  ),
+  MATLAB = list(
+    name = "MATLAB",
+    regex = "\\b(?:MATLAB|MathWorks)\\b",
+    version_regex = "\\bMATLAB\\s+(?:version\\s+|R)?([0-9]{4}[ab]|[0-9]+\\.[0-9]+)",
+    color = "#E16737"
+  ),
+  Minitab = list(
+    name = "Minitab",
+    regex = "\\bMinitab\\b",
+    version_regex = "\\bMinitab\\s+(?:version\\s+|v)?([0-9]+(?:\\.[0-9]+)?)",
+    color = "#6B8E23"
+  ),
+  JMP = list(
+    name = "JMP",
+    regex = "\\b(?:JMP(?:\\s+Pro)?)\\b",
+    version_regex = "\\bJMP\\s+(?:Pro\\s+)?(?:version\\s+|v)?([0-9]+(?:\\.[0-9]+)?)",
+    color = "#4682B4"
+  ),
+  Jamovi = list(
+    name = "Jamovi",
+    regex = "\\bJamovi\\b",
+    version_regex = "\\bJamovi\\s+(?:version\\s+|v)?([0-9]+\\.[0-9]+(?:\\.[0-9]+)?)",
+    color = "#9932CC"
+  ),
+  JASP = list(
+    name = "JASP",
+    regex = "\\bJASP\\b",
+    version_regex = "\\bJASP\\s+(?:version\\s+|v)?([0-9]+\\.[0-9]+(?:\\.[0-9]+)?)",
+    color = "#FF4500"
+  ),
+  RevMan = list(
+    name = "RevMan",
+    regex = "\\bRevMan|Review Manager\\b",
+    version_regex = "\\bRevMan|Review Manager\\s+(?:version\\s+|v)?([0-9]+\\.[0-9]+(?:\\.[0-9]+)?)",
+    color = "#FF4500"
+  )
+)
+
+# Maximum number of PMCIDs to process in one batch
+MAX_PMCIDS <- 20
+
+# --- Helper Functions ---
+
+# Validate and format PMCID
+format_pmcid <- function(pmcid_input) {
+  pmcid_clean <- str_trim(pmcid_input)
+  
+  # Remove PMC prefix if present (case insensitive)
+  pmcid_clean <- str_replace(pmcid_clean, "^(?i)pmc", "")
+  
+  # Check if remaining is numeric
+  if (str_detect(pmcid_clean, "^[0-9]+$")) {
+    return(paste0("PMC", pmcid_clean))
+  } else {
+    return(NULL)  # Invalid format
+  }
+}
+
+# Extract all text from XML with improved strategy
+extract_article_text <- function(xml_doc) {
+  tryCatch({
+    # More comprehensive text extraction
+    text_elements <- xml_find_all(xml_doc, ".//p | .//title[not(ancestor::table-wrap)] | .//abstract | .//caption | .//sec/title | .//fig/caption")
+    
+    if (length(text_elements) == 0) {
+      # Fallback: try to get all text nodes
+      text_elements <- xml_find_all(xml_doc, ".//text()[normalize-space(.) != '']")
+    }
+    
+    text_content <- xml_text(text_elements, trim = TRUE)
+    text_content <- text_content[str_length(text_content) > 0]
+    
+    # Combine and clean
+    full_text <- paste(text_content, collapse = " ")
+    full_text <- str_squish(full_text)  # Remove extra whitespace
+    
+    return(full_text)
+  }, error = function(e) {
+    return("")
+  })
+}
+
+# Detect software in text
+detect_software <- function(text) {
+  if (str_length(text) == 0) return(list())
+  
+  detected <- list()
+  
+  for (software_name in names(STAT_SOFTWARE_REGEX)) {
+    software_info <- STAT_SOFTWARE_REGEX[[software_name]]
+    
+    # Check if software is mentioned
+    if (str_detect(text, regex(software_info$regex, ignore_case = TRUE))) {
+      # Try to extract version
+      version <- NA
+      if (!is.null(software_info$version_regex)) {
+        version_match <- str_match(text, regex(software_info$version_regex, ignore_case = TRUE))
+        if (!is.na(version_match[1, 2])) {
+          version <- version_match[1, 2]
+        }
+      }
+      
+      detected[[software_name]] <- list(
+        name = software_info$name,
+        version = version,
+        color = software_info$color
+      )
+    }
+  }
+  
+  return(detected)
+}
+
+# Process a single PMCID
+process_pmcid <- function(pmcid_input, log_function) {
+  result <- list(
+    pmcid_input = pmcid_input,
+    pmcid_formatted = NA,
+    full_text_accessible = "No",
+    software_detected = list(),
+    error_message = "",
+    processing_time = NA
+  )
+  
+  start_time <- Sys.time()
+  
+  # Format PMCID
+  pmcid_formatted <- format_pmcid(pmcid_input)
+  if (is.null(pmcid_formatted)) {
+    result$error_message <- "Invalid PMCID format"
+    result$processing_time <- as.numeric(difftime(Sys.time(), start_time, units = "secs"))
+    return(result)
+  }
+  
+  result$pmcid_formatted <- pmcid_formatted
+  log_function(paste("Processing", pmcid_formatted))
+  
+  # Fetch XML
+  tryCatch({
+    # Add small delay to be respectful to the API
+    Sys.sleep(0.2)
+    
+    article_xml <- pmc_xml(pmcid_formatted)
+    result$full_text_accessible <- "Yes"
+    
+    # Extract text
+    article_text <- extract_article_text(article_xml)
+    
+    if (str_length(article_text) > 0) {
+      # Detect software
+      detected_software <- detect_software(article_text)
+      result$software_detected <- detected_software
+      
+      if (length(detected_software) > 0) {
+        software_names <- map_chr(detected_software, ~ .x$name)
+        log_function(paste("Found software:", paste(software_names, collapse = ", ")))
+      } else {
+        log_function("No statistical software explicitly identified")
+      }
+    } else {
+      result$error_message <- "No extractable text content"
+      log_function("Warning: No text content extracted")
+    }
+    
+  }, error = function(e) {
+    result$full_text_accessible <- "No"
+    result$error_message <- paste("Fetch error:", str_trunc(e$message, 100))
+    log_function(paste("Error:", e$message))
+  })
+  
+  result$processing_time <- as.numeric(difftime(Sys.time(), start_time, units = "secs"))
+  return(result)
+}
+
+# --- Shiny UI ---
+ui <- fluidPage(
+  useShinyjs(),
+  
+  # Custom CSS
+  tags$head(
+    tags$style(HTML("
+      .software-tag {
+        display: inline-block;
+        padding: 3px 8px;
+        margin: 2px;
+        border-radius: 12px;
+        font-size: 12px;
+        color: white;
+        font-weight: bold;
+      }
+      .error-text {
+        color: #dc3545;
+        font-style: italic;
+      }
+      .success-text {
+        color: #28a745;
+      }
+      .warning-text {
+        color: #ffc107;
+      }
+    "))
+  ),
+  
+  titlePanel("AI-Powered Statistical Software Detector for PubMed Central Articles"),
+  
+  sidebarLayout(
+    sidebarPanel(
+      width = 4,
+      
+      h4("Input"),
+      textAreaInput(
+        "pmcids",
+        "Enter PubMed Central IDs:",
+        rows = 4,
+        placeholder = "e.g., PMC2539593, PMC1728467, 1234567",
+        value = ""
+      ),
+      
+      actionButton(
+        "submit_pmcids",
+        "Analyze Articles",
+        class = "btn-primary btn-block",
+        icon = icon("search")
+      ),
+      
+      conditionalPanel(
+        condition = "input.submit_pmcids > 0",
+        hr(),
+        actionButton(
+          "clear_results",
+          "Clear Results",
+          class = "btn-secondary btn-block",
+          icon = icon("trash")
+        )
+      ),
+      
+      hr(),
+      
+      h5("Instructions:"),
+      tags$ul(
+        tags$li("Enter PMCIDs separated by commas or line breaks"),
+        tags$li("Format: PMC1234567 or just 1234567"),
+        tags$li(paste("Maximum", MAX_PMCIDS, "articles per batch")),
+        tags$li("Only open access articles can be analyzed")
+      ),
+      
+      h5("Detected Software:"),
+      tags$ul(
+        tags$li("R, SPSS, SAS, Stata"),
+        tags$li("Python & libraries (NumPy, Pandas, etc.)"),
+        tags$li("MATLAB, Minitab, JMP"),
+        tags$li("Jamovi, JASP, GraphPad Prism, RevMan")
+      ),
+      
+      h5("Credits:"),
+      tags$ul(
+        tags$li("Reference: Forero DA, Nieminen P. Reporting of Biostatistical Software in Different Study Types in Health and Biomedical Sciences Research: An AI-Powered Approach. Submitted."),
+        tags$li("Vibe Coder: Diego A. Forero, MD, PhD, 2025"),
+        tags$li("Initial R Code Generation: Gemini (Google); R Code Refinement: Claude (Anthropic) 2025"),
+      )
+    ),
+    
+    mainPanel(
+      width = 8,
+      
+      # Results section
+      conditionalPanel(
+        condition = "output.has_results",
+        h3("Analysis Results"),
+        
+        # Summary statistics
+        fluidRow(
+          column(3, wellPanel(
+            h4(textOutput("total_articles"), class = "text-center"),
+            p("Total Articles", class = "text-center text-muted")
+          )),
+          column(3, wellPanel(
+            h4(textOutput("accessible_articles"), class = "text-center"),
+            p("Full Text Available", class = "text-center text-muted")
+          )),
+          column(3, wellPanel(
+            h4(textOutput("software_found"), class = "text-center"),
+            p("With Software", class = "text-center text-muted")
+          )),
+          column(3, wellPanel(
+            h4(textOutput("processing_time"), class = "text-center"),
+            p("Processing Time", class = "text-center text-muted")
+          ))
+        ),
+        
+        # Results table
+        h4("Detailed Results"),
+        DTOutput("results_table"),
+        
+        # Software summary
+        conditionalPanel(
+          condition = "output.has_software",
+          hr(),
+          h4("Software Summary"),
+          plotOutput("software_plot", height = "300px")
+        )
+      ),
+      
+      # Log messages
+      conditionalPanel(
+        condition = "output.has_logs",
+        hr(),
+        h4("Processing Log"),
+        verbatimTextOutput("log_messages")
+      )
+    )
+  )
+)
+
+# --- Shiny Server ---
+server <- function(input, output, session) {
+  
+  # Reactive values
+  results_data <- reactiveVal(NULL)
+  log_messages <- reactiveVal(character())
+  processing <- reactiveVal(FALSE)
+  
+  # Add log message
+  add_log <- function(message) {
+    timestamp <- format(Sys.time(), "%H:%M:%S")
+    new_log <- paste(timestamp, "-", message)
+    log_messages(c(log_messages(), new_log))
+  }
+  
+  # Process PMCIDs
+  observeEvent(input$submit_pmcids, {
+    # Parse input
+    pmcids_raw <- str_split(input$pmcids, "[,\n]")[[1]]
+    pmcids_clean <- str_trim(pmcids_raw)
+    pmcids_clean <- pmcids_clean[pmcids_clean != ""]
+    
+    # Validation
+    if (length(pmcids_clean) == 0) {
+      showNotification("Please enter at least one PMCID.", type = "error")
+      return()
+    }
+    
+    if (length(pmcids_clean) > MAX_PMCIDS) {
+      showNotification(
+        paste("Maximum", MAX_PMCIDS, "PMCIDs allowed per batch. Truncating list."),
+        type = "warning"
+      )
+      pmcids_clean <- pmcids_clean[1:MAX_PMCIDS]
+    }
+    
+    # Start processing
+    processing(TRUE)
+    disable("submit_pmcids")
+    
+    # Clear previous results and logs
+    results_data(NULL)
+    log_messages(character())
+    
+    add_log(paste("Starting analysis of", length(pmcids_clean), "PMCIDs"))
+    
+    # Process with progress
+    withProgress(
+      message = "Processing articles...",
+      value = 0,
+      {
+        results <- list()
+        
+        for (i in seq_along(pmcids_clean)) {
+          incProgress(1 / length(pmcids_clean), detail = paste("Article", i, "of", length(pmcids_clean)))
+          
+          result <- process_pmcid(pmcids_clean[i], add_log)
+          results[[i]] <- result
+        }
+        
+        # Convert to data frame for display
+        df_results <- map_dfr(results, function(r) {
+          software_text <- if (length(r$software_detected) > 0) {
+            software_strings <- map_chr(r$software_detected, function(s) {
+              if (!is.na(s$version)) {
+                paste0(s$name, " (v", s$version, ")")
+              } else {
+                s$name
+              }
+            })
+            paste(software_strings, collapse = "; ")
+          } else {
+            "None detected"
+          }
+          
+          tibble(
+            PMCID_Input = r$pmcid_input,
+            PMCID_Formatted = ifelse(is.na(r$pmcid_formatted), "Invalid", r$pmcid_formatted),
+            Full_Text_Available = r$full_text_accessible,
+            Software_Detected = software_text,
+            Error_Message = ifelse(r$error_message == "", "", r$error_message),
+            Processing_Time_Sec = round(r$processing_time, 2)
+          )
+        })
+        
+        results_data(list(
+          df = df_results,
+          raw = results
+        ))
+        
+        add_log("Analysis completed")
+        
+        # Show summary notification
+        accessible_count <- sum(df_results$Full_Text_Available == "Yes")
+        software_count <- sum(str_detect(df_results$Software_Detected, "^(?!None detected)"))
+        
+        showNotification(
+          paste0("Analysis complete! ", accessible_count, " of ", nrow(df_results), 
+                 " articles accessible, ", software_count, " with software detected."),
+          type = "message"
+        )
+      }
+    )
+    
+    processing(FALSE)
+    enable("submit_pmcids")
+  })
+  
+  # Clear results
+  observeEvent(input$clear_results, {
+    results_data(NULL)
+    log_messages(character())
+    updateTextAreaInput(session, "pmcids", value = "")
+  })
+  
+  # Outputs
+  output$has_results <- reactive({
+    !is.null(results_data())
+  })
+  outputOptions(output, "has_results", suspendWhenHidden = FALSE)
+  
+  output$has_logs <- reactive({
+    length(log_messages()) > 0
+  })
+  outputOptions(output, "has_logs", suspendWhenHidden = FALSE)
+  
+  output$has_software <- reactive({
+    if (is.null(results_data())) return(FALSE)
+    any(str_detect(results_data()$df$Software_Detected, "^(?!None detected)"))
+  })
+  outputOptions(output, "has_software", suspendWhenHidden = FALSE)
+  
+  # Summary statistics
+  output$total_articles <- renderText({
+    if (is.null(results_data())) return("0")
+    nrow(results_data()$df)
+  })
+  
+  output$accessible_articles <- renderText({
+    if (is.null(results_data())) return("0")
+    sum(results_data()$df$Full_Text_Available == "Yes")
+  })
+  
+  output$software_found <- renderText({
+    if (is.null(results_data())) return("0")
+    sum(str_detect(results_data()$df$Software_Detected, "^(?!None detected)"))
+  })
+  
+  output$processing_time <- renderText({
+    if (is.null(results_data())) return("0s")
+    total_time <- sum(results_data()$df$Processing_Time_Sec, na.rm = TRUE)
+    paste0(round(total_time, 1), "s")
+  })
+  
+  # Results table
+  output$results_table <- renderDT({
+    if (is.null(results_data())) return(NULL)
+    
+    df <- results_data()$df
+    
+    # Format the table
+    datatable(
+      df,
+      options = list(
+        pageLength = 15,
+        scrollX = TRUE,
+        columnDefs = list(
+          list(targets = 4, visible = FALSE)  # Hide error column by default
+        )
+      ),
+      rownames = FALSE,
+      escape = FALSE
+    ) %>%
+      formatStyle(
+        "Full_Text_Available",
+        color = styleEqual("Yes", "#28a745"),
+        fontWeight = styleEqual("Yes", "bold")
+      ) %>%
+      formatStyle(
+        "Software_Detected",
+        color = styleEqual("None detected", "#6c757d"),
+        fontStyle = styleEqual("None detected", "italic")
+      )
+  })
+  
+  # Software summary plot
+  output$software_plot <- renderPlot({
+    if (is.null(results_data())) return(NULL)
+    
+    # Extract software counts
+    software_counts <- list()
+    
+    for (result in results_data()$raw) {
+      for (software_name in names(result$software_detected)) {
+        software_info <- result$software_detected[[software_name]]
+        if (software_name %in% names(software_counts)) {
+          software_counts[[software_name]]$count <- software_counts[[software_name]]$count + 1
+        } else {
+          software_counts[[software_name]] <- list(
+            name = software_info$name,
+            count = 1,
+            color = software_info$color
+          )
+        }
+      }
+    }
+    
+    if (length(software_counts) == 0) return(NULL)
+    
+    # Create plot data
+    plot_data <- map_dfr(software_counts, function(s) {
+      tibble(
+        Software = s$name,
+        Count = s$count,
+        Color = s$color
+      )
+    }) %>%
+      arrange(desc(Count))
+    
+    # Create plot
+    ggplot(plot_data, aes(x = reorder(Software, Count), y = Count)) +
+      geom_col(fill = plot_data$Color, alpha = 0.8) +
+      geom_text(aes(label = Count), hjust = -0.1, size = 4) +
+      coord_flip() +
+      labs(
+        x = "Statistical Software",
+        y = "Number of Articles",
+        title = "Statistical Software Detection Summary"
+      ) +
+      theme_minimal() +
+      theme(
+        plot.title = element_text(size = 14, face = "bold"),
+        axis.text = element_text(size = 12),
+        axis.title = element_text(size = 12)
+      ) +
+      scale_y_continuous(expand = expansion(mult = c(0, 0.15)))
+  })
+  
+  # Log messages
+  output$log_messages <- renderText({
+    if (length(log_messages()) == 0) return("No log messages yet...")
+    paste(tail(log_messages(), 50), collapse = "\n")  # Show last 50 messages
+  })
+}
+
+# Run the application
+shinyApp(ui = ui, server = server)
